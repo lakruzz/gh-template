@@ -1,0 +1,165 @@
+#!/bin/bash
+set -e
+
+TEMP_DIR=~/gh_template_temp_repo_clone
+LOG_FILE=./gh_template_log_file.txt
+
+# Function to log and execute a command
+execute() {
+    set +e
+    local CMD="$1"
+    log "$CMD"
+    eval "$CMD"
+    local RESULT=$?
+    log "Return code: $RESULT"
+    return $RESULT
+}
+
+log() {
+    echo "$1" >> "$LOG_FILE"
+}
+
+
+### MAIN SCRIPT ###
+
+## log a to the log in YYYY-MM-DD HH:MM:SS format
+SCRIPT_NAME=$(basename "$0")
+# directory to clone the template repo to - can be changed, but can not contain - or spaces in the file path 
+# and should be empty (or use -f | --force)
+
+USAGE=$(cat << EOF
+Usage: $SCRIPT_NAME <repository> [-f|--force]
+       $SCRIPT_NAME -h|--help
+
+       repository:  The org/name of the GitHub repository to clone
+       -f|--force:  Force the removal of the temporary directory if it already exists
+       -h|--help:   Display this help message
+
+Example: $SCRIPT_NAME octocat/hello-world
+EOF
+)
+
+DESCRIPTION=$(cat << EOF
+$SCRIPT_NAME takes offset in a GitHub repository and applies all of it´s content to the 
+current one as changed files. If there are files from source that already exist in the current repository 
+they will be merged (standard three-way-merge). After applying the template, review the changes and
+commit them to the current repository. Requires the GitHub CLI (gh) to be installed and authenticated.
+EOF
+)
+
+# read the first argument and verify using gh cli that the repo exists
+# if it does, clone it to An empty temp directory in the user's home directory. make sure that the
+# directory does not exist empty before cloning the repo
+
+if [ -z "$1" ]; then
+    echo "$USAGE"
+    exit 1 
+fi
+
+## check if first argument is -h or --help and print the description + usage
+if [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+    echo "$DESCRIPTION"
+    echo ""
+    echo "$USAGE"
+    exit 0
+fi
+
+DIRTY_STATUS=$(git clean -dfxn)
+if [ -n "$DIRTY_STATUS" ]; then
+    echo "ERROR: Repository has untracked or ignored files." >&2
+    echo "You must have a completely clean working directory (including ignored files) to run this script." >&2
+    echo "Please commit, stash or remove them before running this script." >&2
+    echo "You can use:" >&2
+    echo "    git clean -dfx" >&2
+    echo "" >&2
+        echo "$DIRTY_STATUS" | while IFS= read -r line; do
+        echo "    $line" >&2
+    done
+    echo "" >&2
+
+fi
+
+## At this point, assume that the first argument is the repository name
+# Lets get started
+
+TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+log "$TIMESTAMP"
+REPO=$1
+
+execute "command -v gh &> /dev/null"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: gh (GitHub CLI) is not installed." >&2
+    echo "Please install it and authenticate before running this script." >&2
+    echo: "" >&2
+    echo $USAGE >&2
+    exit 1
+else
+    set +e
+    gh auth status > /dev/null 2>&1
+    GH_AUTH_STATUS=$?
+    set -e
+
+    if [ $GH_AUTH_STATUS -ne 0 ]; then
+        echo "ERROR: You are not authenticated with GitHub." >&2
+        echo "Please authenticate with 'gh auth login' before running this script." >&2
+        echo "" >&2
+        echo "$SYNOPSIS" >&2
+        exit 1
+    fi
+fi
+
+## Make sure the temp directory does not exist
+
+if [ -d "$TEMP_DIR" ]; then
+    if [ "$2" == "-f" ] || [ "$2" == "--force" ]; then
+        execute "rm -rf $TEMP_DIR"
+    else
+        echo "ERROR: $TEMP_DIR already exists." >&2 
+        echo "Please remove it yourself or use -f or --force to allow $SCRIPT_NAME to remove it." >&2        
+        exit 1
+    fi
+fi
+
+
+## Check if the repository exists on GitHub
+set +e
+REPO_NAME=$(gh repo view $REPO --json name -q .name 2>/dev/null)
+GH_REPO_STATUS=$?
+set -e
+
+if [ $GH_REPO_STATUS -ne 0 ]; then
+    echo "ERROR:$REPO is not a valid repo on github." >&2
+    echo "" >&2
+    echo "$USAGE" >&2
+    exit 1
+else
+    execute "gh repo clone $REPO $TEMP_DIR/$REPO_NAME -- --depth=1 --quiet"
+fi
+
+## De-git the repo
+execute "rm -rf $TEMP_DIR/$REPO_NAME/.git"
+if $? -ne 0; then
+    echo "ERROR: Could not remove .git directory from cloned repository." >&2
+    exit 1
+fi
+
+execute "cp -r $TEMP_DIR/$REPO_NAME/ ."
+
+echo Template applied. A log of the process was created and can be found in $LOG_FILE.
+echo NOTE: that the log is in your repo, and you probably don´t want to commit it!\n
+echo 
+echo Review the changes and adjust them if necessary. When you are content, add and commit them to the repository.
+echo 
+echo To undo the changes, simply use:
+echo "    git clean -dfx"
+echo
+echo To remove the temporary directory, use:
+echo "    rm -rf $TEMP_DIR"
+
+exit 0
+
+
+if [ -n "$(git clean -dfxn)" ]; then
+    echo "ERROR: Repository has untracked or ignored files." >&2
+fi
